@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0d10">
+<title>引擎聲</title>
+<style>
+  :root { --bg:#0b0d10; --fg:#e8ecf1; --dim:#7c8794; --acc:#ff5a36; --ok:#3ccf7a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,system-ui,sans-serif; }
+  body { padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom)); user-select:none; -webkit-user-select:none; }
+  h1 { font-size:18px; margin:0 0 12px; font-weight:600; }
+  .row { display:flex; gap:8px; margin-bottom:12px; }
+  .seg { flex:1; padding:12px 0; border:1px solid #2a3038; background:#14181d; color:var(--fg); border-radius:10px; font-size:15px; }
+  .seg.on { border-color:var(--acc); background:#2a1610; }
+  #start { width:100%; padding:18px; font-size:20px; border:0; border-radius:14px; background:var(--acc); color:#fff; font-weight:700; }
+  #start.running { background:#2a3038; }
+  .dash { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin:14px 0; text-align:center; }
+  .dash div { background:#14181d; border-radius:12px; padding:10px 0; }
+  .big { font-size:34px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .lbl { font-size:12px; color:var(--dim); }
+  .bar { height:14px; background:#14181d; border-radius:7px; overflow:hidden; margin-bottom:12px; }
+  .bar i { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--ok),#f5c842 70%,var(--acc)); }
+  #sim { margin-top:6px; }
+  #sim .pedals { display:flex; gap:12px; height:46vh; }
+  .pedal { position:relative; flex:1; border-radius:16px; background:#14181d; border:1px solid #2a3038; overflow:hidden; touch-action:none; }
+  .pedal span { position:absolute; left:0; right:0; top:10px; text-align:center; color:var(--dim); font-size:14px; pointer-events:none; }
+  .pedal i { position:absolute; left:0; right:0; bottom:0; height:0; background:rgba(255,90,54,.45); pointer-events:none; }
+  #brake { flex:0 0 32%; }
+  #brake i { background:rgba(120,140,255,.45); }
+  .note { color:var(--dim); font-size:13px; line-height:1.5; }
+  #status { font-size:13px; color:var(--dim); min-height:18px; margin-bottom:8px; }
+  input[type=range] { width:100%; }
+</style>
+</head>
+<body>
+<h1>引擎聲 <span class="lbl">自己玩版</span></h1>
+
+<div class="row" id="engines">
+  <button class="seg on" data-e="v12">V12</button>
+  <button class="seg" data-e="i4">直四</button>
+  <button class="seg" data-e="v6">V6</button>
+  <button class="seg" data-e="v8">V8</button>
+  <button class="seg" data-e="boxer">水平對臥</button>
+</div>
+<div class="row" id="modes">
+  <button class="seg on" data-m="sim">原地試聽</button>
+  <button class="seg" data-m="drive">開車模式</button>
+</div>
+
+<button id="start">開始</button>
+<div id="status"></div>
+
+<div class="dash">
+  <div><div class="big" id="kmh">0</div><div class="lbl">km/h</div></div>
+  <div><div class="big" id="gear">1</div><div class="lbl">檔位</div></div>
+  <div><div class="big" id="rpm">0</div><div class="lbl">轉速</div></div>
+</div>
+<div class="bar"><i id="rpmbar"></i></div>
+
+<div id="sim">
+  <div class="pedals">
+    <div class="pedal" id="brake"><span>煞車</span><i></i></div>
+    <div class="pedal" id="gas"><span>油門（手指往上推）</span><i></i></div>
+  </div>
+</div>
+<div id="drivebox" hidden>
+  <p class="note">手機固定在支架上、螢幕保持亮著。起步後第一次明顯加速或煞車時，會自動學會車頭方向（狀態列會顯示「方向已校正」）。開車時不要操作手機。</p>
+</div>
+
+<p class="lbl">音量</p>
+<input type="range" id="vol" min="0" max="1" step="0.01" value="0.8">
+<p class="note">藍牙：手機先連上車用藍牙再按開始。iPhone 請把側邊靜音開關關掉。</p>
+
+<script src="drivetrain.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let ctx, node, gain, running = false, mode = 'sim', engine = 'v12', wakeLock = null;
+let gas = 0, brake = 0, geoId = null, lastMotionT = 0, timer = null;
+const gb = new Gearbox(), fu = new Fusion(), sim = new SimCar();
+
+function pick(groupId, attr, cb) {
+  $(groupId).addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    [...$(groupId).children].forEach((x) => x.classList.toggle('on', x === b));
+    cb(b.dataset[attr]);
+  });
+}
+pick('engines', 'e', (e) => { engine = e; gb.setEngine(e); node && node.port.postMessage({ engine, redline: gb.redline }); });
+pick('modes', 'm', (m) => {
+  mode = m; $('sim').hidden = m !== 'sim'; $('drivebox').hidden = m !== 'drive';
+  if (running && m === 'drive') startSensors();
+});
+
+function pedal(el, set) {
+  const upd = (e) => {
+    const r = el.getBoundingClientRect();
+    const v = Math.max(0, Math.min(1, (r.bottom - e.clientY) / r.height));
+    set(v); el.querySelector('i').style.height = (v * 100) + '%';
+  };
+  el.addEventListener('pointerdown', (e) => { el.setPointerCapture(e.pointerId); upd(e); });
+  el.addEventListener('pointermove', (e) => { if (e.buttons || e.pressure) upd(e); });
+  const off = () => { set(0); el.querySelector('i').style.height = '0'; };
+  el.addEventListener('pointerup', off); el.addEventListener('pointercancel', off);
+}
+pedal($('gas'), (v) => gas = v);
+pedal($('brake'), (v) => brake = v);
+$('vol').addEventListener('input', (e) => gain && (gain.gain.value = +e.target.value));
+
+async function startAudio() {
+  if (navigator.audioSession) { try { navigator.audioSession.type = 'playback'; } catch (_) {} }
+  ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+  await ctx.audioWorklet.addModule('worklet.js');
+  node = new AudioWorkletNode(ctx, 'engine', { outputChannelCount: [2] });
+  gain = ctx.createGain(); gain.gain.value = +$('vol').value;
+  const comp = ctx.createDynamicsCompressor();
+  node.connect(comp).connect(gain).connect(ctx.destination);
+  node.port.postMessage({ engine, redline: gb.redline });
+  await ctx.resume();
+}
+
+async function startSensors() {
+  if (typeof DeviceMotionEvent !== 'undefined' && DeviceMotionEvent.requestPermission) {
+    try { if (await DeviceMotionEvent.requestPermission() !== 'granted') status('沒有動作感應權限，只能用 GPS（反應會慢）'); }
+    catch (e) { status('動作感應權限要求失敗：' + e.message); }
+  }
+  window.addEventListener('devicemotion', onMotion);
+  if (geoId === null && navigator.geolocation) {
+    geoId = navigator.geolocation.watchPosition(onGps, (e) => status('GPS 錯誤：' + e.message),
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
+  }
+}
+
+function onMotion(e) {
+  const g = e.accelerationIncludingGravity; if (!g || g.x === null) return;
+  const a = e.acceleration && e.acceleration.x !== null ? [a3(e.acceleration)] : null;
+  const now = performance.now(), dt = lastMotionT ? Math.min(0.1, (now - lastMotionT) / 1000) : 0.016;
+  lastMotionT = now;
+  fu.onMotion([g.x, g.y, g.z], a ? a[0] : null, dt, now);
+}
+const a3 = (v) => [v.x, v.y, v.z];
+
+let prevFix = null;
+function onGps(p) {
+  let s = p.coords.speed;
+  if ((s === null || s < 0) && prevFix) { // derive from positions
+    const R = 6371000, toR = Math.PI / 180;
+    const dLat = (p.coords.latitude - prevFix.coords.latitude) * toR;
+    const dLon = (p.coords.longitude - prevFix.coords.longitude) * toR * Math.cos(p.coords.latitude * toR);
+    const dt = (p.timestamp - prevFix.timestamp) / 1000;
+    s = dt > 0 ? Math.hypot(dLat, dLon) * R / dt : null;
+  }
+  prevFix = p;
+  fu.onGps(s, performance.now());
+  status(`GPS ±${Math.round(p.coords.accuracy)} m${fu.fwd ? '・方向已校正' : '・等待第一次加速來校正方向'}`);
+}
+
+function status(t) { $('status').textContent = t; }
+
+function tick() {
+  const now = performance.now(), dt = 0.03;
+  let kmh, load;
+  if (mode === 'sim') {
+    kmh = sim.step(gas, brake, gb.gear, dt, gb.power) * 3.6;
+    load = gas;
+  } else {
+    kmh = fu.v * 3.6;
+    load = fu.load(gb.gear);
+  }
+  const st = gb.update(kmh, load, now);
+  if (st.shifting) load *= 0.15;          // brief throttle cut while shifting
+  node.port.postMessage({ rpm: st.rpm, load });
+  $('kmh').textContent = Math.round(kmh);
+  $('gear').textContent = st.gear;
+  $('rpm').textContent = Math.round(st.rpm / 10) * 10;
+  $('rpmbar').style.width = Math.min(100, st.rpm / gb.redline * 100) + '%';
+}
+
+$('start').addEventListener('click', async () => {
+  if (running) {
+    running = false; clearInterval(timer); await ctx.close(); ctx = null; node = null;
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+    window.removeEventListener('devicemotion', onMotion);
+    if (geoId !== null) { navigator.geolocation.clearWatch(geoId); geoId = null; }
+    $('start').textContent = '開始'; $('start').classList.remove('running'); status('');
+    return;
+  }
+  try {
+    await startAudio();
+    if (mode === 'drive') await startSensors();
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+    timer = setInterval(tick, 30);
+    running = true; $('start').textContent = '停止'; $('start').classList.add('running');
+    if (mode === 'sim') status('用右邊的油門往上推試聽');
+  } catch (e) { status('啟動失敗：' + e.message); }
+});
+document.addEventListener('visibilitychange', async () => {
+  if (running && document.visibilityState === 'visible') {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+    ctx && ctx.resume();
+  }
+});
+</script>
+</body>
+</html>

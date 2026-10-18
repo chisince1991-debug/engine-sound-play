@@ -1,0 +1,4 @@
+test/*.wav
+test/*.png
+test/*.mp3
+.DS_Store
